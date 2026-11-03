@@ -20,7 +20,7 @@ def make_dns_result(status, records=None, error=None):
 
 
 def test_valid_dmarc_record(dns_resolver):
-    dns_resolver.resolve.return_value = make_dns_result(
+    dns_resolver.query.return_value = make_dns_result(
         "success",
         ["v=DMARC1; p=reject"]
     )
@@ -29,13 +29,13 @@ def test_valid_dmarc_record(dns_resolver):
 
     assert result["status"] == "success"
     assert result["policy"] == "reject"
-    dns_resolver.resolve.assert_called_once_with(
+    dns_resolver.query.assert_called_once_with(
         "_dmarc.example.com", "TXT"
     )
 
 
 def test_valid_none_policy_generates_warning(dns_resolver):
-    dns_resolver.resolve.return_value = make_dns_result(
+    dns_resolver.query.return_value = make_dns_result(
         "success",
         ["v=DMARC1; p=none"]
     )
@@ -47,7 +47,7 @@ def test_valid_none_policy_generates_warning(dns_resolver):
 
 
 def test_missing_dmarc_record(dns_resolver):
-    dns_resolver.resolve.return_value = make_dns_result("not_found")
+    dns_resolver.query.return_value = make_dns_result("not_found")
 
     result = check_dmarc("example.com", dns_resolver)
 
@@ -55,7 +55,7 @@ def test_missing_dmarc_record(dns_resolver):
 
 
 def test_no_dmarc_among_txt_records(dns_resolver):
-    dns_resolver.resolve.return_value = make_dns_result(
+    dns_resolver.query.return_value = make_dns_result(
         "success",
         ["google-site-verification=abc123"]
     )
@@ -66,7 +66,7 @@ def test_no_dmarc_among_txt_records(dns_resolver):
 
 
 def test_multiple_dmarc_records(dns_resolver):
-    dns_resolver.resolve.return_value = make_dns_result(
+    dns_resolver.query.return_value = make_dns_result(
         "success",
         [
             "v=DMARC1; p=reject",
@@ -81,7 +81,7 @@ def test_multiple_dmarc_records(dns_resolver):
 
 
 def test_invalid_dmarc_record(dns_resolver):
-    dns_resolver.resolve.return_value = make_dns_result(
+    dns_resolver.query.return_value = make_dns_result(
         "success",
         ["v=DMARC1; p=invalid"]
     )
@@ -93,7 +93,7 @@ def test_invalid_dmarc_record(dns_resolver):
 
 
 def test_dns_timeout(dns_resolver):
-    dns_resolver.resolve.return_value = make_dns_result(
+    dns_resolver.query.return_value = make_dns_result(
         "timeout",
         error="DNS query timed out"
     )
@@ -109,7 +109,7 @@ def test_dns_timeout(dns_resolver):
     ["network_error", "invalid_response"]
 )
 def test_other_dns_failures(dns_resolver, dns_status):
-    dns_resolver.resolve.return_value = make_dns_result(
+    dns_resolver.query.return_value = make_dns_result(
         dns_status,
         error="DNS lookup failed"
     )
@@ -123,11 +123,11 @@ def test_invalid_domain_input(dns_resolver):
     result = check_dmarc("", dns_resolver)
 
     assert result["status"] == "invalid_input"
-    dns_resolver.resolve.assert_not_called()
+    dns_resolver.query.assert_not_called()
 
 
 def test_domain_is_normalized(dns_resolver):
-    dns_resolver.resolve.return_value = make_dns_result(
+    dns_resolver.query.return_value = make_dns_result(
         "success",
         ["v=DMARC1; p=reject"]
     )
@@ -135,13 +135,13 @@ def test_domain_is_normalized(dns_resolver):
     result = check_dmarc(" EXAMPLE.COM ", dns_resolver)
 
     assert result["domain"] == "example.com"
-    dns_resolver.resolve.assert_called_once_with(
+    dns_resolver.query.assert_called_once_with(
         "_dmarc.example.com", "TXT"
     )
 
 
 def test_empty_dns_records(dns_resolver):
-    dns_resolver.resolve.return_value = make_dns_result(
+    dns_resolver.query.return_value = make_dns_result(
         "success",
         []
     )
@@ -153,7 +153,7 @@ def test_empty_dns_records(dns_resolver):
 
 
 def test_unsupported_dmarc_version_is_detected(dns_resolver):
-    dns_resolver.resolve.return_value = make_dns_result(
+    dns_resolver.query.return_value = make_dns_result(
         "success",
         ["v=DMARC2; p=reject"]
     )
@@ -164,7 +164,7 @@ def test_unsupported_dmarc_version_is_detected(dns_resolver):
 
 
 def test_unexpected_dns_response_type(dns_resolver):
-    dns_resolver.resolve.return_value = None
+    dns_resolver.query.return_value = None
 
     result = check_dmarc("example.com", dns_resolver)
 
@@ -172,7 +172,7 @@ def test_unexpected_dns_response_type(dns_resolver):
 
 
 def test_dns_response_without_status(dns_resolver):
-    dns_resolver.resolve.return_value = {"records": []}
+    dns_resolver.query.return_value = {"records": []}
 
     result = check_dmarc("example.com", dns_resolver)
 
@@ -180,7 +180,7 @@ def test_dns_response_without_status(dns_resolver):
 
 
 def test_dns_resolver_raises_exception(dns_resolver):
-    dns_resolver.resolve.side_effect = RuntimeError("Unexpected failure")
+    dns_resolver.query.side_effect = RuntimeError("Unexpected failure")
 
     result = check_dmarc("example.com", dns_resolver)
 
@@ -189,7 +189,7 @@ def test_dns_resolver_raises_exception(dns_resolver):
 
 
 def test_invalid_records_collection(dns_resolver):
-    dns_resolver.resolve.return_value = make_dns_result(
+    dns_resolver.query.return_value = make_dns_result(
         "success",
         records="v=DMARC1; p=reject"
     )

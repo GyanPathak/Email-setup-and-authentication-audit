@@ -28,7 +28,7 @@ def check_dmarc(domain: str, dns_resolver) -> dict:
     dmarc_domain = f"_dmarc.{domain}"
 
     try:
-        dns_result = dns_resolver.resolve(dmarc_domain, "TXT")
+        dns_result = dns_resolver.query(dmarc_domain, "TXT")
     except Exception as exc:
         result["status"] = "error"
         result["errors"].append(
