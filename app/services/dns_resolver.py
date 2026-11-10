@@ -1,5 +1,4 @@
 
-from unittest import result
 
 import dns.exception
 import dns.message
