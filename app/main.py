@@ -1,20 +1,23 @@
 
 import logging
-from fastapi import FastAPI, Depends
+import uuid
+
+from fastapi import Depends, FastAPI, HTTPException
 from pydantic import BaseModel
+from sqlalchemy.orm import Session
 
-from app.services.dns_resolver import DNSResolver
 from app.audit.domain_audit import run_domain_audit
+from app.database import get_db
+from app.models.audit import Audit
+from app.services.dns_resolver import DNSResolver
 
-
-from fastapi import HTTPException
 
 logger = logging.getLogger(__name__)
 
 app = FastAPI(
     title="Email Setup & Authentication Audit",
     description="API for auditing email authentication configurations.",
-    version="1.0.0"
+    version="1.0.0",
 )
 
 
@@ -31,31 +34,74 @@ def get_dns_resolver():
 def health_check():
     return {
         "status": "ok",
-        "service": "email-audit-api"
+        "service": "email-audit-api",
     }
 
 
 @app.post("/api/audits")
 def create_audit(
     request: AuditRequest,
-    dns_resolver: DNSResolver = Depends(get_dns_resolver)
+    dns_resolver: DNSResolver = Depends(get_dns_resolver),
+    db: Session = Depends(get_db),
 ):
     try:
         result = run_domain_audit(
             value=request.domain,
             dns_resolver=dns_resolver,
-            selectors=request.selectors
+            selectors=request.selectors,
         )
 
-        return result
+        # Invalid inputs should not be stored as completed audits.
+        if result.get("overall_status") == "invalid_input":
+            return result
+
+        audit = Audit(
+            domain=result["domain"],
+            root_domain=result["root_domain"],
+            overall_status=result["overall_status"],
+            report=result,
+        )
+
+        db.add(audit)
+        db.commit()
+        db.refresh(audit)
+
+        return {
+            **result,
+            "audit_id": str(audit.audit_id),
+        }
 
     except Exception as exc:
+        db.rollback()
+
         logger.exception(
             "Unexpected error while auditing domain: %s",
-            request.domain
+            request.domain,
         )
 
         raise HTTPException(
             status_code=500,
-            detail="An unexpected error occurred while processing the audit."
+            detail="An unexpected error occurred while processing the audit.",
         ) from exc
+
+
+@app.get("/api/audits/{audit_id}")
+def get_audit(
+    audit_id: uuid.UUID,
+    db: Session = Depends(get_db),
+):
+    audit = db.get(Audit, audit_id)
+
+    if audit is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Audit not found.",
+        )
+
+    return {
+        **audit.report,
+        "audit_id": str(audit.audit_id),
+        "created_at": audit.created_at.isoformat()
+        if audit.created_at
+        else None,
+    }

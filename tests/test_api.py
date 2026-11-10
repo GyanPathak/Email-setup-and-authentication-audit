@@ -1,8 +1,19 @@
-
+﻿
 from fastapi.testclient import TestClient
 
 from app.main import app, get_dns_resolver
 
+import pytest
+
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
+from sqlalchemy.pool import StaticPool
+
+from app.database import Base, get_db
+from app.models.audit import Audit
+
+from sqlalchemy.orm import Session
+from sqlalchemy.exc import SQLAlchemyError
 
 class FakeDNSResolver:
     def query(self, domain: str, record_type: str) -> dict:
@@ -33,6 +44,7 @@ def test_health_endpoint():
     }
 
 
+
 def test_create_audit_endpoint():
     app.dependency_overrides[get_dns_resolver] = (
         lambda: FakeDNSResolver()
@@ -44,21 +56,54 @@ def test_create_audit_endpoint():
                 "/api/audits",
                 json={
                     "domain": "example.com",
-                    "selectors": []
-                }
+                    "selectors": [],
+                },
             )
 
-        assert response.status_code == 200
+            assert response.status_code == 200
 
-        data = response.json()
+            data = response.json()
 
-        assert data["domain"] == "example.com"
-        assert data["checks"]["spf"]["configuration"]["status"] == "pass"
-        assert data["checks"]["dkim"]["status"] == "not_checked"
-        assert data["checks"]["dmarc"]["status"] == "success"
+            assert data["domain"] == "example.com"
+            assert data["checks"]["spf"]["configuration"]["status"] == "pass"
+            assert data["checks"]["dkim"]["status"] == "not_checked"
+            assert data["checks"]["dmarc"]["status"] == "success"
+
+            # Verify that the API returned an audit ID.
+            audit_id = data["audit_id"]
+            assert audit_id
+
+            # Retrieve the saved audit.
+            retrieved_response = client.get(
+                f"/api/audits/{audit_id}"
+            )
+
+            assert retrieved_response.status_code == 200
+
+            retrieved_data = retrieved_response.json()
+
+            assert retrieved_data["audit_id"] == audit_id
+            assert retrieved_data["domain"] == "example.com"
+            assert retrieved_data["checks"] == data["checks"]
+            assert retrieved_data["overall_status"] == data["overall_status"]
+            assert retrieved_data["created_at"]
 
     finally:
         app.dependency_overrides.pop(get_dns_resolver, None)
+
+
+
+def test_get_audit_not_found():
+    with TestClient(app) as client:
+        response = client.get(
+            "/api/audits/00000000-0000-0000-0000-000000000000"
+        )
+
+    assert response.status_code == 404
+    assert response.json() == {
+        "detail": "Audit not found."
+    }
+
 
 
 
@@ -129,3 +174,77 @@ def test_create_audit_handles_unexpected_error():
     }
 
     assert "Internal database details" not in response.text
+
+
+@pytest.fixture(autouse=True)
+def test_database():
+    test_engine = create_engine(
+        "sqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+
+    Base.metadata.create_all(bind=test_engine)
+
+    TestingSessionLocal = sessionmaker(
+        bind=test_engine,
+        autoflush=False,
+        autocommit=False,
+    )
+
+    def override_get_db():
+        db = TestingSessionLocal()
+
+        try:
+            yield db
+        finally:
+            db.close()
+
+    app.dependency_overrides[get_db] = override_get_db
+
+    yield
+
+    app.dependency_overrides.pop(get_db, None)
+    Base.metadata.drop_all(bind=test_engine)
+    test_engine.dispose()
+
+def test_create_audit_handles_database_commit_failure():
+    app.dependency_overrides[get_dns_resolver] = (
+        lambda: FakeDNSResolver()
+    )
+
+    rollback_calls = []
+    original_rollback = Session.rollback
+
+    def tracked_rollback(db):
+        rollback_calls.append(True)
+        return original_rollback(db)
+
+    try:
+        with patch(
+            "sqlalchemy.orm.Session.commit",
+            side_effect=SQLAlchemyError("Simulated database failure"),
+        ), patch(
+            "sqlalchemy.orm.Session.rollback",
+            new=tracked_rollback,
+        ):
+            with TestClient(app) as client:
+                response = client.post(
+                    "/api/audits",
+                    json={
+                        "domain": "example.com",
+                        "selectors": [],
+                    },
+                )
+
+        assert response.status_code == 500
+
+        assert response.json() == {
+            "detail": "An unexpected error occurred while processing the audit."
+        }
+
+        assert "Simulated database failure" not in response.text
+        assert rollback_calls
+
+    finally:
+        app.dependency_overrides.pop(get_dns_resolver, None)
