@@ -248,3 +248,22 @@ def test_create_audit_handles_database_commit_failure():
 
     finally:
         app.dependency_overrides.pop(get_dns_resolver, None)
+
+
+def test_get_audit_handles_database_error():
+    with patch(
+        "sqlalchemy.orm.Session.get",
+        side_effect=SQLAlchemyError("Simulated database read failure"),
+    ):
+        with TestClient(app) as client:
+            response = client.get(
+                "/api/audits/00000000-0000-0000-0000-000000000000"
+            )
+
+    assert response.status_code == 500
+
+    assert response.json() == {
+        "detail": "An unexpected error occurred while retrieving the audit."
+    }
+
+    assert "Simulated database read failure" not in response.text

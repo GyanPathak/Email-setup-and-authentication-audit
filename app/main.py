@@ -4,6 +4,7 @@ import uuid
 
 from fastapi import Depends, FastAPI, HTTPException
 from pydantic import BaseModel
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from app.audit.domain_audit import run_domain_audit
@@ -90,7 +91,19 @@ def get_audit(
     audit_id: uuid.UUID,
     db: Session = Depends(get_db),
 ):
-    audit = db.get(Audit, audit_id)
+    try:
+        audit = db.get(Audit, audit_id)
+
+    except SQLAlchemyError as exc:
+        logger.exception(
+            "Database error while retrieving audit: %s",
+            audit_id,
+        )
+
+        raise HTTPException(
+            status_code=500,
+            detail="An unexpected error occurred while retrieving the audit.",
+        ) from exc
 
     if audit is None:
         raise HTTPException(
