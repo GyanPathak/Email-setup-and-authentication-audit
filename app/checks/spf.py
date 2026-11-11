@@ -1,5 +1,6 @@
 
 import re
+from app.checks.spf_parser import parse_spf_record
 
 
 def _add_issue(issues, code, severity, message, recommendation):
@@ -92,6 +93,19 @@ def check_spf(domain: str, dns_resolver) -> dict:
     # 6. Inspect the single SPF record.
     spf_record = spf_records[0]
     result["record"] = spf_record
+    parsed = parse_spf_record(spf_record)
+    if not parsed["valid"]:
+        for error in parsed["errors"]:
+            _add_issue(
+                result["issues"],
+                "spf_invalid_syntax",
+                "fail",
+                f"Invalid SPF syntax: {error}",
+                "Correct the SPF record syntax and publish the updated DNS TXT record.",
+            )
+
+        result["status"] = "fail"
+        return result
 
     tokens = spf_record.split()
 

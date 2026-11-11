@@ -311,5 +311,62 @@ def test_recursive_spf_analysis_failure_affects_overall_status(monkeypatch):
         selectors=["google"],
     )
 
+    assert result["checks"]["spf"]["configuration"]["status"] == "pass"
     assert result["checks"]["spf"]["analysis"]["status"] == "fail"
+    assert result["overall_status"] == "fail"
+
+def test_invalid_spf_syntax_causes_unified_audit_failure(monkeypatch):
+    import app.audit.domain_audit as audit
+
+    class FakeDNSResolver:
+        def query(self, domain, record_type):
+            if domain == "example.com":
+                return {
+                    "domain": domain,
+                    "record_type": record_type,
+                    "status": "success",
+                    "records": ["v=spf1 unknownmechanism -all"],
+                    "error": None,
+                }
+
+            return {
+                "domain": domain,
+                "record_type": record_type,
+                "status": "not_found",
+                "records": [],
+                "error": None,
+            }
+
+    # Keep this test focused on SPF.
+    monkeypatch.setattr(
+        audit,
+        "check_dkim",
+        lambda domain, selectors, resolver: {
+            "domain": domain,
+            "status": "success",
+            "selectors_checked": [
+                {"selector": "google", "status": "valid"}
+            ],
+        },
+    )
+
+    monkeypatch.setattr(
+        audit,
+        "check_dmarc",
+        lambda domain, resolver: {
+            "domain": domain,
+            "status": "success",
+            "errors": [],
+            "warnings": [],
+        },
+    )
+
+    result = audit.run_domain_audit(
+        "example.com",
+        FakeDNSResolver(),
+        selectors=["google"],
+    )
+
+    assert result["checks"]["spf"]["configuration"]["status"] == "fail"
+    assert result["checks"]["spf"]["analysis"]["status"] == "error"
     assert result["overall_status"] == "fail"
