@@ -267,3 +267,170 @@ def test_get_audit_handles_database_error():
     }
 
     assert "Simulated database read failure" not in response.text
+
+
+
+def test_recheck_audit_creates_new_record_and_preserves_original():
+    app.dependency_overrides[get_dns_resolver] = (
+        lambda: FakeDNSResolver()
+    )
+
+    try:
+        with TestClient(app) as client:
+            # Create the original audit with a DKIM selector.
+            original_response = client.post(
+                "/api/audits",
+                json={
+                    "domain": "example.com",
+                    "selectors": ["google"],
+                },
+            )
+
+            assert original_response.status_code == 200
+
+            original_data = original_response.json()
+            original_id = original_data["audit_id"]
+
+            # Recheck the original audit.
+            recheck_response = client.post(
+                f"/api/audits/{original_id}/recheck"
+            )
+
+            assert recheck_response.status_code == 200
+
+            recheck_data = recheck_response.json()
+            new_id = recheck_data["audit_id"]
+
+            # A recheck must create a different audit record.
+            assert new_id != original_id
+
+            assert recheck_data["domain"] == "example.com"
+
+            # Verify the original audit was not overwritten.
+            retrieved_original = client.get(
+                f"/api/audits/{original_id}"
+            )
+
+            assert retrieved_original.status_code == 200
+
+            assert (
+                retrieved_original.json()["audit_id"]
+                == original_id
+            )
+
+            assert (
+                retrieved_original.json()["checks"]
+                == original_data["checks"]
+            )
+
+            # Verify the new audit was saved.
+            retrieved_new = client.get(
+                f"/api/audits/{new_id}"
+            )
+
+            assert retrieved_new.status_code == 200
+
+            assert retrieved_new.json()["audit_id"] == new_id
+
+            assert retrieved_new.json()["domain"] == "example.com"
+
+            # Verify the original DKIM selector was checked again.
+            assert (
+                retrieved_new.json()["checks"]["dkim"]
+                ["selectors_checked"][0]["selector"]
+                == "google"
+            )
+
+    finally:
+        app.dependency_overrides.pop(get_dns_resolver, None)
+
+
+def test_recheck_audit_not_found():
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/audits/00000000-0000-0000-0000-000000000000/recheck"
+        )
+
+    assert response.status_code == 404
+
+    assert response.json() == {
+        "detail": "Audit not found."
+    }
+
+
+def test_recheck_audit_handles_database_read_error():
+    with patch(
+        "sqlalchemy.orm.Session.get",
+        side_effect=SQLAlchemyError(
+            "Simulated database read failure"
+        ),
+    ):
+        with TestClient(app) as client:
+            response = client.post(
+                "/api/audits/00000000-0000-0000-0000-000000000000/recheck"
+            )
+
+    assert response.status_code == 500
+
+    assert response.json() == {
+        "detail": (
+            "An unexpected error occurred while retrieving the audit."
+        )
+    }
+
+    assert "Simulated database read failure" not in response.text
+
+
+def test_recheck_audit_handles_database_commit_failure():
+    app.dependency_overrides[get_dns_resolver] = (
+        lambda: FakeDNSResolver()
+    )
+
+    try:
+        with TestClient(app) as client:
+            # First create a valid original audit.
+            original_response = client.post(
+                "/api/audits",
+                json={
+                    "domain": "example.com",
+                    "selectors": [],
+                },
+            )
+
+            assert original_response.status_code == 200
+
+            original_id = original_response.json()["audit_id"]
+
+            # Simulate failure only during the recheck commit.
+            with patch(
+                "sqlalchemy.orm.Session.commit",
+                side_effect=SQLAlchemyError(
+                    "Simulated database commit failure"
+                ),
+            ):
+                response = client.post(
+                    f"/api/audits/{original_id}/recheck"
+                )
+
+            assert response.status_code == 500
+
+            assert response.json() == {
+                "detail": (
+                    "An unexpected error occurred while rechecking the audit."
+                )
+            }
+
+            assert (
+                "Simulated database commit failure"
+                not in response.text
+            )
+
+            # Original record must still be available.
+            original_check = client.get(
+                f"/api/audits/{original_id}"
+            )
+
+            assert original_check.status_code == 200
+
+    finally:
+        app.dependency_overrides.pop(get_dns_resolver, None)

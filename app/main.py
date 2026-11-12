@@ -118,3 +118,91 @@ def get_audit(
         if audit.created_at
         else None,
     }
+
+
+@app.post("/api/audits/{audit_id}/recheck")
+def recheck_audit(
+    audit_id: uuid.UUID,
+    dns_resolver: DNSResolver = Depends(get_dns_resolver),
+    db: Session = Depends(get_db),
+):
+    # Retrieve the original audit.
+    try:
+        original_audit = db.get(Audit, audit_id)
+
+    except SQLAlchemyError as exc:
+        logger.exception(
+            "Database error while retrieving audit for recheck: %s",
+            audit_id,
+        )
+        raise HTTPException(
+            status_code=500,
+            detail="An unexpected error occurred while retrieving the audit.",
+        ) from exc
+
+    if original_audit is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Audit not found.",
+        )
+
+    # Recover the DKIM selectors used in the original audit.
+    dkim_check = original_audit.report.get(
+        "checks", {}
+    ).get("dkim", {})
+
+    selectors_checked = dkim_check.get("selectors_checked", [])
+
+    selectors = [
+        item["selector"]
+        for item in selectors_checked
+        if isinstance(item, dict)
+        and isinstance(item.get("selector"), str)
+    ]
+
+    try:
+        # Run a fresh audit.
+        result = run_domain_audit(
+            value=original_audit.domain,
+            dns_resolver=dns_resolver,
+            selectors=selectors,
+        )
+
+        if result.get("overall_status") == "invalid_input":
+            raise HTTPException(
+                status_code=400,
+                detail="The original domain is no longer valid for auditing.",
+            )
+
+        # Save the new result as a separate audit record.
+        new_audit = Audit(
+            domain=result["domain"],
+            root_domain=result["root_domain"],
+            overall_status=result["overall_status"],
+            report=result,
+        )
+
+        db.add(new_audit)
+        db.commit()
+        db.refresh(new_audit)
+
+        return {
+            **result,
+            "audit_id": str(new_audit.audit_id),
+        }
+
+    except HTTPException:
+        raise
+
+    except Exception as exc:
+        db.rollback()
+
+        logger.exception(
+            "Unexpected error while rechecking audit: %s",
+            audit_id,
+        )
+
+        raise HTTPException(
+            status_code=500,
+            detail="An unexpected error occurred while rechecking the audit.",
+        ) from exc
