@@ -14,6 +14,7 @@ from app.models.audit import Audit
 
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import SQLAlchemyError
+from datetime import datetime, timezone
 
 class FakeDNSResolver:
     def query(self, domain: str, record_type: str) -> dict:
@@ -207,6 +208,16 @@ def test_database():
     app.dependency_overrides.pop(get_db, None)
     Base.metadata.drop_all(bind=test_engine)
     test_engine.dispose()
+
+@pytest.fixture
+def db_session(test_database):
+    db_generator = app.dependency_overrides[get_db]()
+    db = next(db_generator)
+
+    try:
+        yield db
+    finally:
+        db_generator.close()
 
 def test_create_audit_handles_database_commit_failure():
     app.dependency_overrides[get_dns_resolver] = (
@@ -434,3 +445,124 @@ def test_recheck_audit_handles_database_commit_failure():
 
     finally:
         app.dependency_overrides.pop(get_dns_resolver, None)
+
+
+
+def test_get_audit_history_returns_saved_audits(db_session):
+    audit = Audit(
+        domain="example.com",
+        root_domain="example.com",
+        overall_status="pass",
+        report={"domain": "example.com"},
+    )
+
+    db_session.add(audit)
+    db_session.commit()
+    db_session.refresh(audit)
+
+    with TestClient(app) as client:
+        response = client.get("/api/audits")
+
+    assert response.status_code == 200
+
+    data = response.json()
+
+    assert len(data) == 1
+    assert data[0]["audit_id"] == str(audit.audit_id)
+    assert data[0]["domain"] == "example.com"
+    assert data[0]["root_domain"] == "example.com"
+    assert data[0]["overall_status"] == "pass"
+    assert data[0]["created_at"]
+
+
+def test_get_audit_history_returns_newest_first(db_session):
+    older_audit = Audit(
+        domain="older.com",
+        root_domain="older.com",
+        overall_status="pass",
+        report={},
+        created_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+    )
+
+    newer_audit = Audit(
+        domain="newer.com",
+        root_domain="newer.com",
+        overall_status="pass",
+        report={},
+        created_at=datetime(2026, 2, 1, tzinfo=timezone.utc),
+    )
+
+    db_session.add_all([older_audit, newer_audit])
+    db_session.commit()
+
+    with TestClient(app) as client:
+        response = client.get("/api/audits")
+
+    assert response.status_code == 200
+
+    data = response.json()
+
+    assert [item["domain"] for item in data] == [
+        "newer.com",
+        "older.com",
+    ]
+
+
+def test_get_audit_history_filters_by_domain(db_session):
+    db_session.add_all([
+        Audit(
+            domain="example.com",
+            root_domain="example.com",
+            overall_status="pass",
+            report={},
+        ),
+        Audit(
+            domain="other.com",
+            root_domain="other.com",
+            overall_status="fail",
+            report={},
+        ),
+    ])
+    db_session.commit()
+
+    with TestClient(app) as client:
+        response = client.get(
+            "/api/audits",
+            params={"domain": "EXAMPLE.COM"},
+        )
+
+    assert response.status_code == 200
+
+    data = response.json()
+
+    assert len(data) == 1
+    assert data[0]["domain"] == "example.com"
+
+
+def test_get_audit_history_returns_empty_list():
+    with TestClient(app) as client:
+        response = client.get("/api/audits")
+
+    assert response.status_code == 200
+    assert response.json() == []
+
+
+def test_get_audit_history_handles_database_error():
+    with patch(
+        "sqlalchemy.orm.Session.scalars",
+        side_effect=SQLAlchemyError(
+            "Simulated database read failure"
+        ),
+    ):
+        with TestClient(app) as client:
+            response = client.get("/api/audits")
+
+    assert response.status_code == 500
+
+    assert response.json() == {
+        "detail": (
+            "An unexpected error occurred while retrieving audit history."
+        )
+    }
+
+    assert "Simulated database read failure" not in response.text

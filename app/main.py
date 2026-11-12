@@ -4,6 +4,7 @@ import uuid
 
 from fastapi import Depends, FastAPI, HTTPException
 from pydantic import BaseModel
+from sqlalchemy import select
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
@@ -11,6 +12,8 @@ from app.audit.domain_audit import run_domain_audit
 from app.database import get_db
 from app.models.audit import Audit
 from app.services.dns_resolver import DNSResolver
+
+
 
 
 logger = logging.getLogger(__name__)
@@ -119,6 +122,49 @@ def get_audit(
         else None,
     }
 
+@app.get("/api/audits")
+def get_audit_history(
+    domain: str | None = None,
+    db: Session = Depends(get_db),
+):
+    try:
+        statement = select(Audit)
+
+        if domain:
+            statement = statement.where(
+                Audit.domain == domain.strip().lower()
+            )
+
+        statement = statement.order_by(
+            Audit.created_at.desc()
+        )
+
+        audits = db.scalars(statement).all()
+
+        return [
+            {
+                "audit_id": str(audit.audit_id),
+                "domain": audit.domain,
+                "root_domain": audit.root_domain,
+                "overall_status": audit.overall_status,
+                "created_at": (
+                    audit.created_at.isoformat()
+                    if audit.created_at
+                    else None
+                ),
+            }
+            for audit in audits
+        ]
+
+    except SQLAlchemyError as exc:
+        logger.exception(
+            "Database error while retrieving audit history."
+        )
+
+        raise HTTPException(
+            status_code=500,
+            detail="An unexpected error occurred while retrieving audit history.",
+        ) from exc
 
 @app.post("/api/audits/{audit_id}/recheck")
 def recheck_audit(
