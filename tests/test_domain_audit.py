@@ -51,6 +51,18 @@ def test_dkim_is_not_checked_without_selectors(monkeypatch):
     assert result["checks"]["dkim"]["status"] == "not_checked"
     assert result["overall_status"] == "partial"
 
+    dkim_finding = next(
+        (
+            finding
+            for finding in result["findings"]
+            if finding["code"] == "dkim_not_checked"
+        ),
+        None,
+    )
+
+    assert dkim_finding is not None
+    assert dkim_finding["severity"] == "info"
+
 
 def test_valid_checks_return_pass(monkeypatch):
     import app.audit.domain_audit as audit

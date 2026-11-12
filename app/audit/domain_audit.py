@@ -109,9 +109,14 @@ def _add_dkim_findings(findings, dkim_check):
             message = f"Could not verify DKIM selector '{selector}' because of a DNS issue."
         elif status == "not_found":
             severity = "warning"
+            record_name = item.get(
+                "record_name",
+                f"{selector}._domainkey.{dkim_check.get('domain', 'unknown')}",
+            )
             message = (
-                f"No DKIM record was found for supplied selector '{selector}'. "
-                "Other selectors may still exist."
+                f"We couldn't find a DKIM key at '{record_name}'. "
+                "This only means this selector wasn't found; "
+                "other selectors may still exist."
             )
         elif status == "invalid_input":
             severity = "warning"
@@ -255,6 +260,15 @@ def run_domain_audit(value, dns_resolver, selectors=None):
             "reason": "No DKIM selectors were supplied.",
             "selectors_checked": [],
         }
+        
+        _add_finding(
+        findings,
+        "dkim",
+        "dkim_not_checked",
+        "info",
+        "DKIM was not checked because no selector was supplied.",
+        "Find the DKIM selector used by your email provider and run the audit again.",
+    )    
     elif not isinstance(selectors, list):
         dkim_check = {
             "status": "invalid_input",

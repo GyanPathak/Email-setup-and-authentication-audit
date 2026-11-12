@@ -47,6 +47,7 @@ def test_missing_dkim_selector():
     )
 
     assert result["missing_selectors"] == 1
+    assert result["status"] == "not_confirmed"
     assert result["selectors_checked"][0]["status"] == "not_found"
 
 

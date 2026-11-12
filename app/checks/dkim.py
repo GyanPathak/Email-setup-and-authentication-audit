@@ -155,17 +155,21 @@ def check_dkim(
                     selector_result["status"] = "valid"
                     result["valid_selectors"] += 1
 
+        # Append every processed selector, regardless of DNS outcome.
         result["selectors_checked"].append(selector_result)
 
+    # Determine aggregate status only after processing all selectors.
     if dns_queries_made == 0:
         result["status"] = "invalid_input"
 
-    elif (
-        result["invalid_selector_inputs"]
-        or result["unverifiable_selectors"]
-        or result["missing_selectors"]
-    ):
+    elif result["unverifiable_selectors"]:
         result["status"] = "partial"
+
+    elif result["invalid_selector_inputs"]:
+        result["status"] = "partial"
+
+    elif result["missing_selectors"]:
+        result["status"] = "not_confirmed"
 
     elif result["invalid_selectors"] or result["revoked_selectors"]:
         result["status"] = "warning"
