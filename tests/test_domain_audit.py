@@ -1,6 +1,8 @@
+import pytest
 from unittest.mock import Mock
 
 from app.audit.domain_audit import run_domain_audit
+
 
 
 def make_resolver():
@@ -382,3 +384,321 @@ def test_invalid_spf_syntax_causes_unified_audit_failure(monkeypatch):
     assert result["checks"]["spf"]["configuration"]["status"] == "fail"
     assert result["checks"]["spf"]["analysis"]["status"] == "error"
     assert result["overall_status"] == "fail"
+
+def test_spf_softfail_is_info_when_dmarc_enforces_rejection(monkeypatch):
+    import app.audit.domain_audit as audit
+
+    monkeypatch.setattr(
+        audit,
+        "check_spf",
+        lambda domain, resolver: {
+            "domain": domain,
+            "status": "warning",
+            "record": "v=spf1 include:_spf.google.com ~all",
+            "issues": [
+                {
+                    "code": "spf_softfail_all",
+                    "severity": "warning",
+                    "message": "The SPF record uses ~all.",
+                    "recommendation": "Review whether -all is appropriate.",
+                }
+            ],
+        },
+    )
+
+    monkeypatch.setattr(
+        audit,
+        "evaluate_spf",
+        lambda domain, resolver: {
+            "status": "success",
+            "errors": [],
+            "warnings": [],
+            "limit_exceeded": False,
+        },
+    )
+
+    monkeypatch.setattr(
+        audit,
+        "check_dkim",
+        lambda domain, selectors, resolver: {
+            "domain": domain,
+            "status": "success",
+            "selectors_checked": [
+                {"selector": "google", "status": "valid"}
+            ],
+        },
+    )
+
+    monkeypatch.setattr(
+        audit,
+        "check_dmarc",
+        lambda domain, resolver: {
+            "domain": domain,
+            "status": "success",
+            "policy": "reject",
+            "tags": {"p": "reject"},
+            "errors": [],
+            "warnings": [],
+        },
+    )
+
+    result = audit.run_domain_audit(
+        "example.com",
+        make_resolver(),
+        selectors=["google"],
+    )
+
+    finding = next(
+        item for item in result["findings"]
+        if item["code"] == "spf_softfail_all"
+    )
+
+    assert finding["severity"] == "info"
+    assert result["checks"]["spf"]["configuration"]["status"] == "warning"
+    assert result["overall_status"] == "pass"
+
+@pytest.mark.parametrize(
+    "dmarc_check, expected_severity",
+    [
+        (
+            {
+                "status": "success",
+                "policy": "reject",
+                "tags": {"p": "reject"},
+                "errors": [],
+                "warnings": [],
+            },
+            "info",
+        ),
+        (
+            {
+                "status": "success",
+                "policy": "quarantine",
+                "tags": {"p": "quarantine", "pct": "100"},
+                "errors": [],
+                "warnings": [],
+            },
+            "info",
+        ),
+        (
+            {
+                "status": "success",
+                "policy": "none",
+                "tags": {"p": "none"},
+                "errors": [],
+                "warnings": [],
+            },
+            "warning",
+        ),
+        (
+            {
+                "status": "success",
+                "policy": "reject",
+                "tags": {"p": "reject", "pct": "20"},
+                "errors": [],
+                "warnings": [],
+            },
+            "warning",
+        ),
+        (
+            {
+                "status": "missing",
+                "policy": None,
+                "tags": {},
+                "errors": [],
+                "warnings": [],
+            },
+            "warning",
+        ),
+        (
+            {
+                "status": "invalid",
+                "policy": "reject",
+                "tags": {"p": "reject"},
+                "errors": ["Invalid DMARC record."],
+                "warnings": [],
+            },
+            "warning",
+        ),
+        (
+            {
+                "status": "unverifiable",
+                "policy": "reject",
+                "tags": {"p": "reject"},
+                "errors": ["DNS lookup timed out."],
+                "warnings": [],
+            },
+            "warning",
+        ),
+    ],
+)
+def test_spf_softfail_severity_depends_on_dmarc_policy(
+    monkeypatch, dmarc_check, expected_severity
+):
+    import app.audit.domain_audit as audit
+
+    monkeypatch.setattr(
+        audit,
+        "check_spf",
+        lambda domain, resolver: {
+            "domain": domain,
+            "status": "warning",
+            "record": "v=spf1 include:_spf.google.com ~all",
+            "issues": [
+                {
+                    "code": "spf_softfail_all",
+                    "severity": "warning",
+                    "message": "The SPF record uses ~all.",
+                    "recommendation": "Review whether -all is appropriate.",
+                }
+            ],
+        },
+    )
+
+    monkeypatch.setattr(
+        audit,
+        "evaluate_spf",
+        lambda domain, resolver: {
+            "status": "success",
+            "errors": [],
+            "warnings": [],
+            "limit_exceeded": False,
+        },
+    )
+
+    monkeypatch.setattr(
+        audit,
+        "check_dkim",
+        lambda domain, selectors, resolver: {
+            "domain": domain,
+            "status": "success",
+            "selectors_checked": [
+                {"selector": "google", "status": "valid"}
+            ],
+        },
+    )
+
+    monkeypatch.setattr(
+        audit,
+        "check_dmarc",
+        lambda domain, resolver: dmarc_check,
+    )
+
+    result = audit.run_domain_audit(
+        "example.com",
+        make_resolver(),
+        selectors=["google"],
+    )
+
+    finding = next(
+        item for item in result["findings"]
+        if item["code"] == "spf_softfail_all"
+    )
+
+    assert finding["severity"] == expected_severity
+
+
+
+def test_every_finding_has_required_explanation_fields(monkeypatch):
+    import app.audit.domain_audit as audit
+
+    monkeypatch.setattr(
+        audit,
+        "check_spf",
+        lambda domain, resolver: {
+            "domain": domain,
+            "status": "warning",
+            "record": None,
+            "issues": [],
+        },
+    )
+    monkeypatch.setattr(
+        audit,
+        "check_dmarc",
+        lambda domain, resolver: {
+            "domain": domain,
+            "status": "missing",
+            "errors": [],
+            "warnings": [],
+        },
+    )
+
+    result = audit.run_domain_audit("example.com", make_resolver())
+
+    required_fields = {
+        "meaning",
+        "why_it_matters",
+        "caution",
+        "verification",
+    }
+
+    assert result["findings"]
+
+    for finding in result["findings"]:
+        assert required_fields.issubset(finding.keys())
+        assert all(
+            isinstance(finding[field], str) and finding[field].strip()
+            for field in required_fields
+        )
+
+
+def test_spf_softfail_explanation_generates_valid_dns_example():
+    from app.audit.finding_explanations import get_finding_explanation
+
+    record = (
+        "v=spf1 include:_spf.google.com "
+        "include:example.com ~all"
+    )
+
+    explanation = get_finding_explanation(
+        {"code": "spf_softfail_all"},
+        {
+            "spf": {"configuration": {"record": record}},
+            "dmarc": {
+                "status": "success",
+                "policy": "none",
+                "tags": {"p": "none"},
+            },
+        },
+    )
+
+    assert explanation["dns_example"]["current_record"] == record
+    assert explanation["dns_example"]["alternative_record"] == (
+        "v=spf1 include:_spf.google.com include:example.com -all"
+    )
+
+
+@pytest.mark.parametrize(
+    "record",
+    [
+        "v=spf1 include: ~all",
+        "v=spf1 include:_spf.google.com ~all -all",
+        "v=spf1 include:_spf.google.com -all",
+    ],
+)
+def test_invalid_or_non_softfail_record_has_no_dns_example(record):
+    from app.audit.finding_explanations import get_finding_explanation
+
+    explanation = get_finding_explanation(
+        {"code": "spf_softfail_all"},
+        {
+            "spf": {"configuration": {"record": record}},
+            "dmarc": {"status": "missing", "tags": {}},
+        },
+    )
+
+    assert "dns_example" not in explanation
+
+
+def test_unknown_finding_code_uses_fallback_explanation():
+    from app.audit.finding_explanations import (
+        DEFAULT_EXPLANATION,
+        get_finding_explanation,
+    )
+
+    explanation = get_finding_explanation(
+        {"code": "future_unknown_finding"},
+        {},
+    )
+
+    assert explanation == DEFAULT_EXPLANATION

@@ -3,6 +3,7 @@ from app.checks.spf_evaluator import evaluate_spf
 from app.checks.dkim import check_dkim
 from app.checks.dmarc import check_dmarc
 from app.validators.domain import extract_hostname, validate_domain
+from app.audit.finding_explanations import get_finding_explanation
 
 
 def _add_finding(findings, check, code, severity, message, recommendation=None):
@@ -44,13 +45,39 @@ def _is_dns_failure(message):
     return any(indicator in text for indicator in indicators)
 
 
-def _add_spf_findings(findings, spf_check):
+def _add_spf_findings(findings, spf_check, dmarc_check=None):
+    dmarc_check = dmarc_check or {}
+
+    dmarc_tags = dmarc_check.get("tags", {})
+    if not isinstance(dmarc_tags, dict):
+        dmarc_tags = {}
+
+    policy = str(dmarc_check.get("policy") or "").lower()
+
+    pct = dmarc_tags.get("pct")
+    try:
+        pct = 100 if pct is None else int(pct)
+    except (TypeError, ValueError):
+        pct = 0
+
+    dmarc_enforces_policy = (
+        dmarc_check.get("status") == "success"
+        and policy in ("reject", "quarantine")
+        and pct == 100
+    )
+
     for issue in spf_check.get("issues", []):
         severity = issue.get("severity", "warning")
 
-        # A DNS error means we could not verify SPF, not that SPF failed.
         if severity == "error":
             severity = "unverifiable"
+
+        if (
+            issue.get("code") == "spf_softfail_all"
+            and severity == "warning"
+            and dmarc_enforces_policy
+        ):
+            severity = "info"
 
         _add_finding(
             findings,
@@ -114,9 +141,7 @@ def _add_dkim_findings(findings, dkim_check):
                 f"{selector}._domainkey.{dkim_check.get('domain', 'unknown')}",
             )
             message = (
-                f"We couldn't find a DKIM key at '{record_name}'. "
-                "This only means this selector wasn't found; "
-                "other selectors may still exist."
+                f"We couldn't find a DKIM public key at '{record_name}'."
             )
         elif status == "invalid_input":
             severity = "warning"
@@ -137,9 +162,10 @@ def _add_dkim_findings(findings, dkim_check):
             f"dkim_{status or 'unknown'}",
             severity,
             message,
-            "Confirm the selector used by your email provider and check its DNS TXT record.",
-        )
+            " Confirm the selector with your email provider before changing DNS.",
 
+        )
+        findings[-1]["selector"] = selector
 
 def _add_dmarc_findings(findings, dmarc_check):
     status = dmarc_check.get("status")
@@ -181,18 +207,45 @@ def _add_dmarc_findings(findings, dmarc_check):
 
 def _get_overall_status(findings, checks):
     severities = {item["severity"] for item in findings}
+    spf_softfail_is_info = any(
+    item["check"] == "spf"
+    and item["code"] == "spf_softfail_all"
+    and item["severity"] == "info"
+    for item in findings
+    )
+
+    other_spf_warnings = any(
+    item["check"] == "spf"
+    and item["severity"] == "warning"
+    for item in findings
+    )
 
     # Collect statuses from both top-level and nested checks.
     statuses = []
 
-    for check in checks.values():
+    for check_name, check in checks.items():
         if isinstance(check, dict) and "status" in check:
             statuses.append(check["status"])
 
         elif isinstance(check, dict):
-            for subcheck in check.values():
-                if isinstance(subcheck, dict) and "status" in subcheck:
-                    statuses.append(subcheck["status"])
+            for subcheck_name, subcheck in check.items():
+                if not isinstance(subcheck, dict):
+                    continue
+
+                status = subcheck.get("status")
+                if status is None:
+                    continue
+
+                if (
+                    check_name == "spf"
+                    and subcheck_name == "configuration"
+                    and status == "warning"
+                    and spf_softfail_is_info
+                    and not other_spf_warnings
+                ):
+                    continue
+
+                statuses.append(status)
 
     # Explicit failures take priority.
     if "fail" in severities or any(
@@ -241,7 +294,7 @@ def run_domain_audit(value, dns_resolver, selectors=None):
 
     # SPF configuration check
     spf_check = _safe_run(check_spf, hostname, dns_resolver)
-    _add_spf_findings(findings, spf_check)
+
 
     # Recursive SPF analysis only makes sense when a record was found.
     if spf_check.get("record"):
@@ -260,7 +313,7 @@ def run_domain_audit(value, dns_resolver, selectors=None):
             "reason": "No DKIM selectors were supplied.",
             "selectors_checked": [],
         }
-        
+
         _add_finding(
         findings,
         "dkim",
@@ -268,7 +321,7 @@ def run_domain_audit(value, dns_resolver, selectors=None):
         "info",
         "DKIM was not checked because no selector was supplied.",
         "Find the DKIM selector used by your email provider and run the audit again.",
-    )    
+    )
     elif not isinstance(selectors, list):
         dkim_check = {
             "status": "invalid_input",
@@ -289,6 +342,10 @@ def run_domain_audit(value, dns_resolver, selectors=None):
 
     # DMARC check
     dmarc_check = _safe_run(check_dmarc, hostname, dns_resolver)
+
+    # SPF finding severity can depend on the verified DMARC policy.
+    _add_spf_findings(findings, spf_check, dmarc_check)
+
     _add_dmarc_findings(findings, dmarc_check)
 
     checks = {
@@ -299,6 +356,8 @@ def run_domain_audit(value, dns_resolver, selectors=None):
         "dkim": dkim_check,
         "dmarc": dmarc_check,
     }
+    for finding in findings:
+        finding.update(get_finding_explanation(finding, checks))
 
     return {
         "domain": hostname,

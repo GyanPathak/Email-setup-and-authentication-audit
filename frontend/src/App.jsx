@@ -30,6 +30,54 @@ function StatusBadge({ status }) {
   )
 }
 
+
+function CopyButton({ value }) {
+  const [copied, setCopied] = useState(false)
+
+  async function handleCopy() {
+    try {
+      await navigator.clipboard.writeText(value)
+      setCopied(true)
+      setTimeout(() => setCopied(false), 1500)
+    } catch {
+      setCopied(false)
+    }
+  }
+
+  return (
+    <button
+      type="button"
+      className="copy-button"
+      onClick={handleCopy}
+      disabled={!value}
+      title={copied ? 'Copied!' : 'Copy record'}
+aria-label={copied ? 'Copied' : 'Copy record'}
+    >
+      {copied ? (
+  <span aria-label="Copied">✓</span>
+) : (
+  <svg
+    width="15"
+    height="15"
+    viewBox="0 0 24 24"
+    fill="none"
+    stroke="currentColor"
+    strokeWidth="1.8"
+    strokeLinecap="round"
+    strokeLinejoin="round"
+    aria-hidden="true"
+  >
+    <rect x="8" y="8" width="13" height="13" rx="2" />
+    <path d="M16 8V5a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h3" />
+  </svg>
+)}
+
+
+    </button>
+  )
+}
+
+
 function DetailRow({ label, value }) {
   if (value === undefined || value === null || value === '') return null
 
@@ -103,12 +151,107 @@ function ProtocolCard({ type, name, description, status, summary, record }) {
   )
 }
 
+
+
+function FindingCard({ finding, index }) {
+  const findingTitles = {
+    dkim_not_found: 'DKIM selector not found',
+    dkim_not_checked: 'DKIM was not checked',
+    dkim_unverifiable: 'DKIM lookup could not be completed',
+    dkim_invalid_input: 'Invalid DKIM selector',
+    dkim_invalid: 'DKIM record is invalid',
+    dkim_revoked: 'DKIM key has been revoked',
+  }
+
+  const title =
+    findingTitles[finding.code] ||
+    `${finding.check?.toUpperCase() || 'GENERAL'} finding`
+
+  return (
+    <article className="finding" key={`${finding.code}-${index}`}>
+      <div className="finding-number">
+        {String(index + 1).padStart(2, '0')}
+      </div>
+
+      <div className="finding-content">
+        <div className="finding-top">
+          <strong>{title}</strong>
+          <StatusBadge status={finding.severity} />
+        </div>
+
+        <div className="finding-section">
+          <span className="finding-label">WHAT WE FOUND</span>
+          <p>{finding.message}</p>
+          <small className="finding-code">
+            {finding.selector ? `SELECTOR: ${finding.selector} · ` : ''}
+            {finding.code}
+          </small>
+        </div>
+
+        {finding.why_it_matters && (
+          <div className="finding-section">
+            <span className="finding-label">WHY THIS MATTERS</span>
+            <p>{finding.why_it_matters}</p>
+          </div>
+        )}
+
+        {finding.recommendation && (
+          <div className="recommendation">
+            <strong>RECOMMENDED ACTION</strong>
+            <p>{finding.recommendation}</p>
+          </div>
+        )}
+
+        {finding.dns_example && (
+          <div className="dns-example">
+            <span className="finding-label">DNS EXAMPLE</span>
+            <p>{finding.dns_example.label}</p>
+
+            <div className="dns-example-record">
+              <strong>Current record</strong>
+              <pre>{finding.dns_example.current_record}</pre>
+              <CopyButton value={finding.dns_example.current_record} />
+            </div>
+
+            <div className="dns-example-record">
+              <strong>Optional alternative to review</strong>
+              <pre>{finding.dns_example.alternative_record}</pre>
+              <CopyButton value={finding.dns_example.alternative_record} />
+            </div>
+
+            <p className="dns-example-note">{finding.dns_example.note}</p>
+          </div>
+        )}
+
+                {(finding.caution || finding.verification) && (
+          <div className="finding-guidance">
+            {finding.caution && (
+              <div className="finding-caution">
+                <strong>CAUTION</strong>
+                <p>{finding.caution}</p>
+              </div>
+            )}
+
+            {finding.verification && (
+              <div className="finding-verification">
+                <strong>VERIFY</strong>
+                <p>{finding.verification}</p>
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+    </article>
+  )
+}
+
 function App() {
   const [domain, setDomain] = useState('')
   const [selectors, setSelectors] = useState('')
   const [audit, setAudit] = useState(null)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
+  const [activeFindingTab, setActiveFindingTab] = useState('')
 
   async function runAudit(event) {
     event.preventDefault()
@@ -169,6 +312,39 @@ function App() {
   const checks = audit?.checks || {}
   const findings = audit?.findings || []
 
+  const actionableFindings = findings.filter(
+  (finding) => finding.severity !== 'info'
+)
+
+const informationalFindings = findings.filter(
+  (finding) => finding.severity === 'info'
+)
+
+const criticalFindings = findings.filter(
+  (finding) => ['critical', 'fail'].includes(finding.severity)
+)
+
+const warningFindings = findings.filter(
+  (finding) =>
+    finding.severity !== 'info' &&
+    !['critical', 'fail'].includes(finding.severity)
+)
+
+const findingTabs = [
+  { id: 'info', label: 'Informational notes', items: informationalFindings },
+  { id: 'warning', label: 'Warnings', items: warningFindings },
+  { id: 'critical', label: 'Critical', items: criticalFindings },
+]
+
+const defaultFindingTab =
+  findingTabs.find((tab) => tab.items.length > 0) || findingTabs[0]
+
+const selectedFindingTab =
+  findingTabs.find((tab) => tab.id === activeFindingTab) ||
+  defaultFindingTab
+
+const visibleFindings = selectedFindingTab.items
+
   const spf = checks.spf || {}
   const spfConfig = spf.configuration || {}
   const dkim = checks.dkim || {}
@@ -207,11 +383,21 @@ function App() {
     },
   ]
 
-  const checkedCount = [
-    spfStatus,
-    dkim.status,
-    dmarc.status,
-  ].filter((status) => status && status !== 'not_checked').length
+const protocolStatuses = [
+  spfStatus,
+  dkim.status,
+  dmarc.status,
+]
+
+const assessedCount = protocolStatuses.filter(
+  (status) => status && status !== 'not_checked'
+).length
+
+const passedCount = protocolStatuses.filter(
+  (status) => ['pass', 'success', 'valid'].includes(status)
+).length
+
+const needsReviewCount = assessedCount - passedCount
 
   return (
     <div className="app-shell">
@@ -382,7 +568,7 @@ function App() {
                 <div>
                   <h2>Authentication checks</h2>
                   <p>
-                    {checkedCount} of 3 protocols checked. Review each result
+                    {assessedCount} protocols assessed · {passedCount} passed · {needsReviewCount} needs review.
                     below.
                   </p>
                 </div>
@@ -394,6 +580,7 @@ function App() {
                   <ProtocolCard key={protocol.type} {...protocol} />
                 ))}
               </div>
+
 
               {dkim.selectors_checked?.length > 0 && (
                 <section className="detail-card">
@@ -410,78 +597,101 @@ function App() {
                       <div className="selector-info">
                         <strong>{item.selector}</strong>
                         <p>{item.record_name || 'Record name unavailable'}</p>
-                        {item.error && (
-                          <p className="selector-error">{item.error}</p>
-                        )}
-                        {item.record && (
-                          <details className="technical-details">
-                            <summary>View selector record</summary>
-                            <pre>{item.record}</pre>
-                          </details>
-                        )}
+
+                        <details className="technical-details">
+                          <summary>View DNS details</summary>
+
+                          {item.error && (
+                            <p className="selector-error">{item.error}</p>
+                          )}
+
+                          {item.record && (
+                            <>
+                              <strong>DNS TXT record</strong>
+                              <pre>{item.record}</pre>
+                            </>
+                          )}
+
+                          {!item.error && !item.record && (
+                            <p>DNS lookup status: {item.status}</p>
+                          )}
+                        </details>
                       </div>
+
                       <StatusBadge status={item.status} />
                     </div>
                   ))}
                 </section>
               )}
 
-              <section className="detail-card findings-card">
-                <div className="section-title">
-                  <div>
-                    <span className="section-kicker">WHAT NEEDS ATTENTION</span>
-                    <h3>Audit findings & recommended actions</h3>
-                    <p>
-                      Issues and recommendations identified by the actual DNS
-                      checks.
-                    </p>
-                  </div>
-                  <span className="finding-count">
-                    {findings.length} {findings.length === 1 ? 'finding' : 'findings'}
-                  </span>
-                </div>
 
-                {findings.length === 0 ? (
-                  <div className="no-findings">
-                    <span className="success-symbol">✓</span>
+
+                <section className="detail-card findings-card">
+                  <div className="section-title">
                     <div>
-                      <strong>No findings returned</strong>
+                      <span className="section-kicker">AUDIT SUMMARY</span>
+                      <h3>Findings & recommended actions</h3>
                       <p>
-                        The current validation rules did not identify any
-                        findings in the checked records.
+                        Issues identified by the DNS checks and information about
+                        anything the audit could not verify.
                       </p>
                     </div>
-                  </div>
-                ) : (
-                  <div className="findings-list">
-                    {findings.map((finding, index) => (
-                      <article className="finding" key={`${finding.code}-${index}`}>
-                        <div className="finding-number">
-                          {String(index + 1).padStart(2, '0')}
-                        </div>
-                        <div className="finding-content">
-                          <div className="finding-top">
-                            <strong>
-                              {finding.check?.toUpperCase() || 'GENERAL'}
-                              {' / '}
-                              {finding.code}
-                            </strong>
-                            <StatusBadge status={finding.severity} />
-                          </div>
-                          <p>{finding.message}</p>
 
-                          {finding.recommendation && (
-                            <div className="recommendation">
-                              <strong>RECOMMENDED ACTION</strong>
-                              <p>{finding.recommendation}</p>
-                            </div>
-                          )}
-                        </div>
-                      </article>
-                    ))}
+                    <span className="finding-count">
+                      {findings.length} {findings.length === 1 ? 'finding' : 'findings'}
+                    </span>
                   </div>
-                )}
-              </section>
+
+                  {findings.length === 0 ? (
+                    <div className="no-findings">
+                      <span className="success-symbol">✓</span>
+                      <div>
+                        <strong>No findings returned</strong>
+                        <p>
+                          The current validation rules did not identify any
+                          findings in the checked records.
+                        </p>
+                      </div>
+                    </div>
+                  ) : (
+                    <>
+                      <div className="finding-tabs" role="group" aria-label="Filter findings">
+                        {findingTabs.map((tab) => (
+                          <button
+                            key={tab.id}
+                            type="button"
+                            className={`finding-tab ${
+                              selectedFindingTab.id === tab.id ? 'active' : ''
+                            }`}
+                            aria-pressed={selectedFindingTab.id === tab.id}
+                            onClick={() => setActiveFindingTab(tab.id)}
+                          >
+                            <span>{tab.label}</span>
+                            <span className="finding-tab-count">{tab.items.length}</span>
+                          </button>
+                        ))}
+                      </div>
+
+                      {visibleFindings.length > 0 ? (
+                        <div className="findings-list">
+                          {visibleFindings.map((finding, index) => (
+                            <FindingCard
+                              key={`${finding.code}-${index}`}
+                              finding={finding}
+                              index={index}
+                            />
+                          ))}
+                        </div>
+                      ) : (
+                        <div className="no-findings">
+                          <strong>No {selectedFindingTab.label.toLowerCase()}.</strong>
+                          <p>There are no findings in this category for the current audit.</p>
+                        </div>
+                      )}
+                    </>
+                  )}
+                </section>
+
 
               <div className="audit-meta">
                 <span>Audit ID: {audit.audit_id}</span>
