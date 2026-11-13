@@ -1,7 +1,7 @@
 ﻿
 from fastapi.testclient import TestClient
 
-from app.main import app, get_dns_resolver
+from app.main import app, get_dns_resolver, rate_limiter
 
 import pytest
 
@@ -202,9 +202,11 @@ def test_database():
             db.close()
 
     app.dependency_overrides[get_db] = override_get_db
+    rate_limiter.reset()
 
     yield
-
+    
+    rate_limiter.reset()
     app.dependency_overrides.pop(get_db, None)
     Base.metadata.drop_all(bind=test_engine)
     test_engine.dispose()
@@ -583,3 +585,79 @@ def test_get_audit_history_disabled_by_default(monkeypatch):
     assert response.json() == {
         "detail": "Audit history is disabled."
     }
+    
+    
+
+def test_create_audit_rate_limit(monkeypatch):
+    monkeypatch.setattr(
+        "app.main.run_domain_audit",
+        lambda **kwargs: {"overall_status": "invalid_input"},
+    )
+
+    with TestClient(app) as client:
+        for _ in range(10):
+            response = client.post(
+                "/api/audits",
+                json={"domain": "invalid-domain"},
+            )
+            assert response.status_code == 200
+
+        response = client.post(
+            "/api/audits",
+            json={"domain": "invalid-domain"},
+        )
+
+    assert response.status_code == 429
+    assert response.json()["detail"] == (
+        "Too many audit requests. Please try again later."
+    )
+    assert int(response.headers["Retry-After"]) > 0
+
+
+def test_recheck_audit_rate_limit():
+    audit_id = "00000000-0000-0000-0000-000000000000"
+
+    with TestClient(app) as client:
+        for _ in range(10):
+            response = client.post(
+                f"/api/audits/{audit_id}/recheck"
+            )
+            assert response.status_code == 404
+
+        response = client.post(
+            f"/api/audits/{audit_id}/recheck"
+        )
+
+    assert response.status_code == 429
+    assert int(response.headers["Retry-After"]) > 0
+    
+def test_audit_and_recheck_share_rate_limit(monkeypatch):
+    monkeypatch.setattr(
+        "app.main.run_domain_audit",
+        lambda **kwargs: {"overall_status": "invalid_input"},
+    )
+
+    audit_id = "00000000-0000-0000-0000-000000000000"
+
+    with TestClient(app) as client:
+        # First 9 requests use audit creation.
+        for _ in range(9):
+            response = client.post(
+                "/api/audits",
+                json={"domain": "invalid-domain"},
+            )
+            assert response.status_code == 200
+
+        # The recheck consumes the 10th request.
+        response = client.post(
+            f"/api/audits/{audit_id}/recheck"
+        )
+        assert response.status_code == 404
+
+        # The next audit request must be rejected.
+        response = client.post(
+            "/api/audits",
+            json={"domain": "invalid-domain"},
+        )
+
+    assert response.status_code == 429

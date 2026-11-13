@@ -3,7 +3,7 @@ import logging
 import uuid
 import os
 
-from fastapi import Depends, FastAPI, HTTPException
+from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from sqlalchemy import select
@@ -14,11 +14,34 @@ from app.audit.domain_audit import run_domain_audit
 from app.database import get_db
 from app.models.audit import Audit
 from app.services.dns_resolver import DNSResolver
+from app.services.rate_limiter import InMemoryRateLimiter
 
 
 
 
 logger = logging.getLogger(__name__)
+rate_limiter = InMemoryRateLimiter(
+    limit=10,
+    window_seconds=60,
+)
+
+
+def enforce_rate_limit(request: Request):
+    client_ip = (
+        request.client.host
+        if request.client
+        else "unknown"
+    )
+
+    allowed, retry_after = rate_limiter.is_allowed(client_ip)
+
+    if not allowed:
+        raise HTTPException(
+            status_code=429,
+            detail="Too many audit requests. Please try again later.",
+            headers={"Retry-After": str(retry_after)},
+        )
+
 
 app = FastAPI(
     title="Email Setup & Authentication Audit",
@@ -57,9 +80,12 @@ def health_check():
 @app.post("/api/audits")
 def create_audit(
     request: AuditRequest,
+    client_request: Request,
     dns_resolver: DNSResolver = Depends(get_dns_resolver),
     db: Session = Depends(get_db),
 ):
+    enforce_rate_limit(client_request)
+    
     try:
         result = run_domain_audit(
             value=request.domain,
@@ -192,9 +218,12 @@ def get_audit_history(
 @app.post("/api/audits/{audit_id}/recheck")
 def recheck_audit(
     audit_id: uuid.UUID,
+    client_request: Request,
     dns_resolver: DNSResolver = Depends(get_dns_resolver),
     db: Session = Depends(get_db),
 ):
+    enforce_rate_limit(client_request)
+    
     # Retrieve the original audit.
     try:
         original_audit = db.get(Audit, audit_id)
