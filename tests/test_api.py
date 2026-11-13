@@ -448,7 +448,8 @@ def test_recheck_audit_handles_database_commit_failure():
 
 
 
-def test_get_audit_history_returns_saved_audits(db_session):
+def test_get_audit_history_returns_saved_audits(db_session, monkeypatch):
+    monkeypatch.setenv("ENABLE_AUDIT_LIST", "true")
     audit = Audit(
         domain="example.com",
         root_domain="example.com",
@@ -475,7 +476,8 @@ def test_get_audit_history_returns_saved_audits(db_session):
     assert data[0]["created_at"]
 
 
-def test_get_audit_history_returns_newest_first(db_session):
+def test_get_audit_history_returns_newest_first(db_session,  monkeypatch):
+    monkeypatch.setenv("ENABLE_AUDIT_LIST", "true")
     older_audit = Audit(
         domain="older.com",
         root_domain="older.com",
@@ -508,7 +510,8 @@ def test_get_audit_history_returns_newest_first(db_session):
     ]
 
 
-def test_get_audit_history_filters_by_domain(db_session):
+def test_get_audit_history_filters_by_domain(db_session, monkeypatch):
+    monkeypatch.setenv("ENABLE_AUDIT_LIST", "true")
     db_session.add_all([
         Audit(
             domain="example.com",
@@ -539,7 +542,8 @@ def test_get_audit_history_filters_by_domain(db_session):
     assert data[0]["domain"] == "example.com"
 
 
-def test_get_audit_history_returns_empty_list():
+def test_get_audit_history_returns_empty_list(monkeypatch ):
+    monkeypatch.setenv("ENABLE_AUDIT_LIST", "true")
     with TestClient(app) as client:
         response = client.get("/api/audits")
 
@@ -547,7 +551,9 @@ def test_get_audit_history_returns_empty_list():
     assert response.json() == []
 
 
-def test_get_audit_history_handles_database_error():
+def test_get_audit_history_handles_database_error(monkeypatch):
+    monkeypatch.setenv("ENABLE_AUDIT_LIST", "true")
+    
     with patch(
         "sqlalchemy.orm.Session.scalars",
         side_effect=SQLAlchemyError(
@@ -566,3 +572,14 @@ def test_get_audit_history_handles_database_error():
     }
 
     assert "Simulated database read failure" not in response.text
+
+def test_get_audit_history_disabled_by_default(monkeypatch):
+    monkeypatch.delenv("ENABLE_AUDIT_LIST", raising=False)
+
+    with TestClient(app) as client:
+        response = client.get("/api/audits")
+
+    assert response.status_code == 404
+    assert response.json() == {
+        "detail": "Audit history is disabled."
+    }

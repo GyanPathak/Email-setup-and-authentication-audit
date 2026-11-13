@@ -1,6 +1,7 @@
 
 import logging
 import uuid
+import os
 
 from fastapi import Depends, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -105,6 +106,7 @@ def get_audit(
     audit_id: uuid.UUID,
     db: Session = Depends(get_db),
 ):
+
     try:
         audit = db.get(Audit, audit_id)
 
@@ -138,6 +140,16 @@ def get_audit_history(
     domain: str | None = None,
     db: Session = Depends(get_db),
 ):
+    audit_list_enabled = os.getenv(
+        "ENABLE_AUDIT_LIST", "false"
+    ).strip().lower() in {"1", "true", "yes", "on"}
+
+    if not audit_list_enabled:
+        raise HTTPException(
+            status_code=404,
+            detail="Audit history is disabled.",
+       )
+
     try:
         statement = select(Audit)
 
